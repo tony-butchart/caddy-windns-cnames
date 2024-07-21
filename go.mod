@@ -8,6 +8,7 @@ require (
 	gitlab.com/NebulousLabs/go-upnp v0.0.0-20211002182029-11da932010b6
 	go.uber.org/zap v1.27.0
 	golang.org/x/crypto v0.25.0
+	github.com/caddyserver/caddy/v2/modules/caddyhttp v2.8.4
 )
 
 require (
