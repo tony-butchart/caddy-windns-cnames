@@ -25,6 +25,7 @@ func init() {
 //	        password <password>
 //	    }
 //	    ttl <duration>
+//	    auto_cname [<zone>]
 //	}
 //
 // If <names...> are omitted after <zone>, then "@" will be assumed.
@@ -94,6 +95,11 @@ func parseApp(d *caddyfile.Dispenser, _ interface{}) (interface{}, error) {
 				return nil, err
 			}
 			app.TTL = caddy.Duration(dur)
+		case "auto_cname":
+			app.AutoCNAME = true
+			if d.NextArg() {
+				app.AutoCNAMEZone = d.Val()
+			}
 		default:
 			return nil, d.ArgErr()
 		}

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/ssh"
 )
@@ -44,6 +45,12 @@ type App struct {
 
 	// The TTL to set on DNS records.
 	TTL caddy.Duration `json:"ttl,omitempty"`
+
+	// If true, automatically create CNAME records for reverse proxies
+	AutoCNAME bool `json:"auto_cname,omitempty"`
+
+	// The zone to use for automatic CNAME records
+	AutoCNAMEZone string `json:"auto_cname_zone,omitempty"`
 
 	ctx    caddy.Context
 	logger *zap.Logger
@@ -70,16 +77,23 @@ func (a *App) Provision(ctx caddy.Context) error {
 	return nil
 }
 
-func (a App) Start() error {
+func (a *App) Start() error {
+	if a.AutoCNAME {
+		err := a.addReverseProxyCNAMEs()
+		if err != nil {
+			return fmt.Errorf("failed to add reverse proxy CNAMEs: %v", err)
+		}
+	}
+
 	go a.checkerLoop()
 	return nil
 }
 
-func (a App) Stop() error {
+func (a *App) Stop() error {
 	return nil
 }
 
-func (a App) checkerLoop() {
+func (a *App) checkerLoop() {
 	ticker := time.NewTicker(time.Duration(a.CheckInterval))
 	defer ticker.Stop()
 
@@ -95,7 +109,7 @@ func (a App) checkerLoop() {
 	}
 }
 
-func (a App) updateDNS() {
+func (a *App) updateDNS() {
 	a.logger.Debug("beginning DNS update")
 
 	allDomains := a.allDomains()
@@ -119,7 +133,7 @@ func (a App) updateDNS() {
 	a.logger.Info("finished updating DNS")
 }
 
-func (a App) updateCNAME(zone, domain string) error {
+func (a *App) updateCNAME(zone, domain string) error {
 	config := &ssh.ClientConfig{
 		User: a.DNSServer.User,
 		Auth: []ssh.AuthMethod{
@@ -155,8 +169,44 @@ func (a App) updateCNAME(zone, domain string) error {
 	return nil
 }
 
-func (a App) allDomains() map[string][]string {
+func (a *App) allDomains() map[string][]string {
 	return a.Domains
+}
+
+func (a *App) addReverseProxyCNAMEs() error {
+	// Get the HTTP app
+	httpAppIface, err := a.ctx.App("http")
+	if err != nil {
+		return fmt.Errorf("failed to get HTTP app: %v", err)
+	}
+	httpApp := httpAppIface.(*caddyhttp.App)
+
+	// Iterate over all servers and routes
+	for _, server := range httpApp.Servers {
+		for _, route := range server.Routes {
+			// Check if this route has a reverse proxy
+			for _, handler := range route.HandlersRaw {
+				if rpHandler, ok := handler.(*caddyhttp.ReverseProxy); ok {
+					// This is a reverse proxy. Get the hostname from the matcher.
+					for _, matcherSet := range route.MatcherSets {
+						for _, matcher := range matcherSet {
+							if hostMatcher, ok := matcher.(caddyhttp.MatchHost); ok {
+								for _, host := range hostMatcher {
+									// Add this host to our domains
+									if a.Domains == nil {
+										a.Domains = make(map[string][]string)
+									}
+									a.Domains[a.AutoCNAMEZone] = append(a.Domains[a.AutoCNAMEZone], strings.TrimSuffix(host, "."+a.AutoCNAMEZone))
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 const defaultCheckInterval = 30 * time.Minute
