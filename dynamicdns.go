@@ -15,70 +15,40 @@
 package dynamicdns
 
 import (
-	"encoding/json"
 	"fmt"
-	"net"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
-	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
-	"github.com/libdns/libdns"
 	"go.uber.org/zap"
+	"golang.org/x/crypto/ssh"
 )
 
 func init() {
 	caddy.RegisterModule(App{})
 }
 
-// App is a Caddy app that keeps your DNS records updated with the public
-// IP address of your instance. It updates A and AAAA records.
 type App struct {
-	// The sources from which to get the server's public IP address.
-	// Multiple sources can be specified for redundancy.
-	// Default: simple_http
-	IPSourcesRaw []json.RawMessage `json:"ip_sources,omitempty" caddy:"namespace=dynamic_dns.ip_sources inline_key=source"`
+	// The configuration for the Windows DNS server
+	DNSServer struct {
+		Host     string `json:"host,omitempty"`
+		User     string `json:"user,omitempty"`
+		Password string `json:"password,omitempty"`
+	} `json:"dns_server,omitempty"`
 
-	// The configuration for the DNS provider with which the DNS
-	// records will be updated.
-	DNSProviderRaw json.RawMessage `json:"dns_provider,omitempty" caddy:"namespace=dns.providers inline_key=name"`
-
-	// The record names, keyed by DNS zone, for which to update the A/AAAA records.
-	// Record names are relative to the zone. The zone is usually your registered
-	// domain name. To refer to the zone itself, use the record name of "@".
-	//
-	// For example, assuming your zone is example.com, and you want to update A/AAAA
-	// records for "example.com" and "www.example.com" so that they resolve to this
-	// Caddy instance, configure like so: `"example.com": ["@", "www"]`
+	// The record names, keyed by DNS zone, for which to update the CNAME records.
 	Domains map[string][]string `json:"domains,omitempty"`
 
-	// If enabled, no new DNS records will be created. Only existing records will be updated.
-	// This means that the A or AAAA records need to be created manually ahead of time.
-	UpdateOnly bool `json:"update_only,omitempty"`
-
-	// If enabled, the "http" app's config will be scanned to assemble the list
-	// of domains for which to enable dynamic DNS updates.
-	DynamicDomains bool `json:"dynamic_domains,omitempty"`
-
-	// The IP versions to enable. By default, both "ipv4" and "ipv6" will be enabled.
-	// To disable IPv6, specify {"ipv6": false}.
-	Versions IPVersions `json:"versions,omitempty"`
-
-	// How frequently to check the public IP address. Default: 30m
+	// How frequently to check and update DNS records. Default: 30m
 	CheckInterval caddy.Duration `json:"check_interval,omitempty"`
 
 	// The TTL to set on DNS records.
 	TTL caddy.Duration `json:"ttl,omitempty"`
 
-	ipSources   []IPSource
-	dnsProvider libdns.RecordSetter
-
 	ctx    caddy.Context
 	logger *zap.Logger
 }
 
-// CaddyModule returns the Caddy module information.
 func (App) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "dynamic_dns",
@@ -86,40 +56,10 @@ func (App) CaddyModule() caddy.ModuleInfo {
 	}
 }
 
-// Provision sets up the app module.
 func (a *App) Provision(ctx caddy.Context) error {
 	a.ctx = ctx
 	a.logger = ctx.Logger(a)
 
-	// set up the DNS provider module
-	if len(a.DNSProviderRaw) == 0 {
-		return fmt.Errorf("a DNS provider is required")
-	}
-	val, err := ctx.LoadModule(a, "DNSProviderRaw")
-	if err != nil {
-		return fmt.Errorf("loading DNS provider module: %v", err)
-	}
-	a.dnsProvider = val.(libdns.RecordSetter)
-
-	// set up the IP source module or use a default
-	if a.IPSourcesRaw != nil {
-		vals, err := ctx.LoadModule(a, "IPSourcesRaw")
-		if err != nil {
-			return fmt.Errorf("loading IP source module: %v", err)
-		}
-		for _, val := range vals.([]interface{}) {
-			a.ipSources = append(a.ipSources, val.(IPSource))
-		}
-	}
-	if len(a.ipSources) == 0 {
-		var sh SimpleHTTP
-		if err = sh.Provision(ctx); err != nil {
-			return err
-		}
-		a.ipSources = []IPSource{sh}
-	}
-
-	// make sure a check interval is set
 	if a.CheckInterval == 0 {
 		a.CheckInterval = caddy.Duration(defaultCheckInterval)
 	}
@@ -130,326 +70,94 @@ func (a *App) Provision(ctx caddy.Context) error {
 	return nil
 }
 
-// Start starts the app module.
 func (a App) Start() error {
 	go a.checkerLoop()
 	return nil
 }
 
-// Stop stops the app module.
 func (a App) Stop() error {
 	return nil
 }
 
-// checkerLoop checks the public IP address at every check
-// interval. It stops when a.ctx is cancelled.
 func (a App) checkerLoop() {
 	ticker := time.NewTicker(time.Duration(a.CheckInterval))
 	defer ticker.Stop()
 
-	a.checkIPAndUpdateDNS()
+	a.updateDNS()
 
 	for {
 		select {
 		case <-ticker.C:
-			a.checkIPAndUpdateDNS()
+			a.updateDNS()
 		case <-a.ctx.Done():
 			return
 		}
 	}
 }
 
-// checkIPAndUpdateDNS checks public IP addresses and, for any IP addresses
-// that are different from before, it updates DNS records accordingly.
-func (a App) checkIPAndUpdateDNS() {
-	a.logger.Debug("beginning IP address check")
-
-	lastIPsMu.Lock()
-	defer lastIPsMu.Unlock()
-
-	var err error
+func (a App) updateDNS() {
+	a.logger.Debug("beginning DNS update")
 
 	allDomains := a.allDomains()
 
-	// if we don't know current IPs, look them up from DNS
-	if lastIPs == nil {
-		lastIPs, err = a.lookupCurrentIPsFromDNS(allDomains)
-		if err != nil {
-			// not the end of the world, but might be an extra initial API hit with the DNS provider
-			a.logger.Error("unable to lookup current IPs from DNS records", zap.Error(err))
-		}
-		a.logger.Debug("looked up current IPs from DNS", zap.Any("lastIPs", lastIPs))
-	}
-
-	// look up current address(es) from first successful IP source
-	var currentIPs []net.IP
-	for _, ipSrc := range a.ipSources {
-		currentIPs, err = ipSrc.GetIPs(a.ctx, a.Versions)
-		if len(currentIPs) == 0 {
-			err = fmt.Errorf("no IP addresses returned")
-		}
-		if err == nil {
-			break
-		}
-		a.logger.Error("looking up IP address",
-			zap.String("ip_source", ipSrc.(caddy.Module).CaddyModule().ID.Name()),
-			zap.Error(err))
-	}
-
-	// make sure the source returns tidy info; duplicates are wasteful
-	currentIPs = removeDuplicateIPs(currentIPs)
-
-	// do a diff of current and previous IPs to make DNS records to update
-	updatedRecsByZone := make(map[string][]libdns.Record)
-	for _, ip := range currentIPs {
-		for zone, domains := range allDomains {
-			for _, domain := range domains {
-				oldIps, found := lastIPs[libdns.AbsoluteName(domain, zone)][recordType(ip)]
-				if !found && a.UpdateOnly {
-					a.logger.Debug("record doesn't exist; skipping update",
-						zap.String("zone", zone),
-						zap.String("name", domain),
-						zap.String("type", recordType(ip)),
-					)
-					continue
-				}
-
-				if found && ipListContains(oldIps, ip) {
-					// IP is not different and no new domains to manage; no update needed
-					continue
-				}
-
-				updatedRecsByZone[zone] = append(updatedRecsByZone[zone], libdns.Record{
-					Type:  recordType(ip),
-					Name:  domain,
-					Value: ip.String(),
-					TTL:   time.Duration(a.TTL),
-				})
-			}
-		}
-	}
-
-	if len(updatedRecsByZone) == 0 {
-		a.logger.Debug("no IP address change; no update needed")
-		return
-	}
-
-	for zone, records := range updatedRecsByZone {
-		for _, rec := range records {
-			a.logger.Info("updating DNS record",
-				zap.String("zone", zone),
-				zap.String("type", rec.Type),
-				zap.String("name", rec.Name),
-				zap.String("value", rec.Value),
-				zap.Duration("ttl", rec.TTL),
-			)
-		}
-		_, err = a.dnsProvider.SetRecords(a.ctx, zone, records)
-		if err != nil {
-			a.logger.Error("failed setting DNS record(s) with new IP address(es)",
-				zap.String("zone", zone),
-				zap.Error(err),
-			)
-		}
-		for _, rec := range records {
-			name := libdns.AbsoluteName(rec.Name, zone)
-			if lastIPs == nil {
-				lastIPs = make(domainTypeIPs)
-			}
-			if lastIPs[name] == nil {
-				lastIPs[name] = make(map[string][]net.IP)
-			}
-			lastIPs[name][rec.Type] = []net.IP{net.ParseIP(rec.Value)}
-		}
-	}
-
-	currentIPStrings := make([]string, len(currentIPs))
-	for i, val := range currentIPs {
-		currentIPStrings[i] = val.String()
-	}
-	a.logger.Info("finished updating DNS",
-		zap.Strings("current_ips", currentIPStrings))
-}
-
-// lookupCurrentIPsFromDNS looks up the current IP addresses
-// from DNS records.
-func (a App) lookupCurrentIPsFromDNS(domains map[string][]string) (domainTypeIPs, error) {
-	types := []string{recordTypeA, recordTypeAAAA}
-
-	// avoid duplicates
-	currentIPs := make(domainTypeIPs)
-
-	if recordGetter, ok := a.dnsProvider.(libdns.RecordGetter); ok {
-		for zone, names := range domains {
-			recs, err := recordGetter.GetRecords(a.ctx, zone)
+	for zone, domains := range allDomains {
+		for _, domain := range domains {
+			err := a.updateCNAME(zone, domain)
 			if err != nil {
-				return nil, err
-			}
-
-			recMap := make(map[string]map[string]net.IP)
-			for _, r := range recs {
-				if r.Type != recordTypeA && r.Type != recordTypeAAAA {
-					continue
-				}
-				a.logger.Debug("found DNS record", zap.String("type", r.Type), zap.String("name", r.Name), zap.String("zone", zone), zap.String("value", r.Value))
-				ip := net.ParseIP(r.Value)
-				if ip != nil {
-					name := libdns.AbsoluteName(r.Name, zone)
-					if _, ok := recMap[name]; !ok {
-						recMap[name] = make(map[string]net.IP)
-					}
-					recMap[name][r.Type] = ip
-				} else {
-					a.logger.Error("invalid IP address found in current DNS record", zap.String("value", r.Value), zap.String("type", r.Type))
-				}
-			}
-			for _, n := range names {
-				name := libdns.AbsoluteName(n, zone)
-				ips := make(map[string][]net.IP)
-				for _, t := range types {
-					if ip, ok := recMap[name][t]; ok {
-						ips[t] = []net.IP{ip}
-					} else {
-						a.logger.Info("domain not found in DNS", zap.String("domain", name))
-						ips[t] = []net.IP{nilIP}
-					}
-				}
-				currentIPs[name] = ips
+				a.logger.Error("failed updating CNAME record",
+					zap.String("zone", zone),
+					zap.String("domain", domain),
+					zap.Error(err))
+			} else {
+				a.logger.Info("updated CNAME record",
+					zap.String("zone", zone),
+					zap.String("domain", domain))
 			}
 		}
 	}
 
-	return currentIPs, nil
+	a.logger.Info("finished updating DNS")
 }
 
-func (a App) lookupManagedDomains() ([]string, error) {
-	cai, err := a.ctx.App("http")
+func (a App) updateCNAME(zone, domain string) error {
+	config := &ssh.ClientConfig{
+		User: a.DNSServer.User,
+		Auth: []ssh.AuthMethod{
+			ssh.Password(a.DNSServer.Password),
+		},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+	}
+
+	client, err := ssh.Dial("tcp", a.DNSServer.Host+":22", config)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("failed to dial: %v", err)
 	}
-	var hosts []string
-	ca := cai.(*caddyhttp.App)
-	for _, s := range ca.Servers {
-		for _, r := range s.Routes {
-			for _, ms := range r.MatcherSets {
-				for _, rm := range ms {
-					if hs, ok := rm.(caddyhttp.MatchHost); ok {
-						for _, h := range hs {
-							hosts = append(hosts, h)
-						}
-					}
+	defer client.Close()
 
-				}
-			}
-		}
-
+	session, err := client.NewSession()
+	if err != nil {
+		return fmt.Errorf("failed to create session: %v", err)
 	}
-	return hosts, nil
+	defer session.Close()
+
+	cmd := fmt.Sprintf("Add-DnsServerResourceRecordCName -ZoneName %s -Name %s -HostNameAlias %s", zone, domain, zone)
+	fullCmd := fmt.Sprintf("powershell -Command \"%s\"", cmd)
+
+	output, err := session.CombinedOutput(fullCmd)
+	if err != nil {
+		return fmt.Errorf("failed to run command: %v, output: %s", err, string(output))
+	}
+
+	if strings.Contains(string(output), "Error") {
+		return fmt.Errorf("DNS record update failed: %s", string(output))
+	}
+
+	return nil
 }
 
 func (a App) allDomains() map[string][]string {
-	if !a.DynamicDomains {
-		return a.Domains
-	}
-
-	// Read hosts from config.
-	m, err := a.lookupManagedDomains()
-	if err != nil {
-		return a.Domains
-	}
-
-	a.logger.Info("Loaded dynamic domains", zap.Strings("domains", m))
-	d := make(map[string][]string)
-	for zone, domains := range a.Domains {
-		d[zone] = domains
-		for _, h := range m {
-			name, ok := func() (string, bool) {
-				if h == zone {
-					return "@", true
-				}
-				suffix := "." + zone
-				if n := strings.TrimSuffix(h, suffix); n != h {
-					return n, true
-				}
-				return "", false
-			}()
-			if !ok {
-				// Not in this zone.
-				continue
-			}
-			a.logger.Info("Adding dynamic domain", zap.String("domain", name))
-			d[zone] = append(d[zone], name)
-		}
-	}
-	return d
+	return a.Domains
 }
-
-// recordType returns the DNS record type associated with the version of ip.
-func recordType(ip net.IP) string {
-	if ip.To4() == nil {
-		return recordTypeAAAA
-	}
-	return recordTypeA
-}
-
-// removeDuplicateIPs returns ips without duplicates.
-func removeDuplicateIPs(ips []net.IP) []net.IP {
-	uniqueIPs := make(map[string]net.IP)
-	for _, ip := range ips {
-		uniqueIPs[ip.String()] = ip
-	}
-	clean := make([]net.IP, 0, len(uniqueIPs))
-	for _, ip := range uniqueIPs {
-		clean = append(clean, ip)
-	}
-	return clean
-}
-
-// ipListContains returns true if list contains ip; false otherwise.
-func ipListContains(list []net.IP, ip net.IP) bool {
-	for _, ipInList := range list {
-		if ipInList.Equal(ip) {
-			return true
-		}
-	}
-	return false
-}
-
-// IPVersions is the IP versions to enable for dynamic DNS.
-// Versions are enabled if true or nil, set to false to disable.
-type IPVersions struct {
-	IPv4 *bool `json:"ipv4,omitempty"`
-	IPv6 *bool `json:"ipv6,omitempty"`
-}
-
-// V4Enabled returns true if IPv4 is enabled.
-func (ip IPVersions) V4Enabled() bool {
-	return ip.IPv4 == nil || *ip.IPv4
-}
-
-// V6Enabled returns true if IPv6 is enabled.
-func (ip IPVersions) V6Enabled() bool {
-	return ip.IPv6 == nil || *ip.IPv6
-}
-
-type domainTypeIPs map[string]map[string][]net.IP
-
-// Remember what the last IPs are so that we
-// don't try to update DNS records every
-// time a new config is loaded; the IPs are
-// unlikely to change very often.
-var (
-	lastIPs   domainTypeIPs
-	lastIPsMu sync.Mutex
-
-	// Special value indicate there is a new domain to manage.
-	nilIP net.IP
-)
-
-const (
-	recordTypeA    = "A"
-	recordTypeAAAA = "AAAA"
-)
 
 const defaultCheckInterval = 30 * time.Minute
 
