@@ -186,7 +186,7 @@ func (a *App) addReverseProxyCNAMEs() error {
 		for _, route := range server.Routes {
 			// Check if this route has a reverse proxy
 			for _, handler := range route.HandlersRaw {
-				if rpHandler, ok := handler.(*caddyhttp.ReverseProxy); ok {
+				if _, ok := handler.(*caddyhttp.ReverseProxy); ok {
 					// This is a reverse proxy. Get the hostname from the matcher.
 					for _, matcherSet := range route.MatcherSets {
 						for _, matcher := range matcherSet {
