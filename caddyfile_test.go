@@ -18,8 +18,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
-	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
+	"github.com/caddyserver/caddy/caddyconfig/caddyfile"
+	"github.com/caddyserver/caddy/caddyconfig/httpcaddyfile"
 	"github.com/google/go-cmp/cmp"
 )
 
