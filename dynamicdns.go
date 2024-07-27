@@ -15,6 +15,7 @@
 package dynamicdns
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -185,8 +186,15 @@ func (a *App) addReverseProxyCNAMEs() error {
 	for _, server := range httpApp.Servers {
 		for _, route := range server.Routes {
 			// Check if this route has a reverse proxy
-			for _, handler := range route.HandlersRaw {
-				if _, ok := handler.(*caddyhttp.ReverseProxy); ok {
+			for _, rawHandler := range route.HandlersRaw {
+				var handler map[string]interface{}
+				err := json.Unmarshal(rawHandler, &handler)
+				if err != nil {
+					return fmt.Errorf("failed to unmarshal handler: %v", err)
+				}
+
+				// Check if this handler is a reverse proxy
+				if handlerType, ok := handler["handler"].(string); ok && handlerType == "reverse_proxy" {
 					// This is a reverse proxy. Get the hostname from the matcher.
 					for _, matcherSet := range route.MatcherSets {
 						for _, matcher := range matcherSet {
