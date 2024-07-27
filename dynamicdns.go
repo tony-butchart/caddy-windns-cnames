@@ -145,12 +145,14 @@ func (a *App) updateCNAME(zone, domain string) error {
 
 	client, err := ssh.Dial("tcp", a.DNSServer.Host+":22", config)
 	if err != nil {
+		a.logger.Error("Failed to dial SSH server", zap.Error(err))
 		return fmt.Errorf("failed to dial: %v", err)
 	}
 	defer client.Close()
 
 	session, err := client.NewSession()
 	if err != nil {
+		a.logger.Error("Failed to create SSH session", zap.Error(err))
 		return fmt.Errorf("failed to create session: %v", err)
 	}
 	defer session.Close()
@@ -158,15 +160,20 @@ func (a *App) updateCNAME(zone, domain string) error {
 	cmd := fmt.Sprintf("Add-DnsServerResourceRecordCName -ZoneName %s -Name %s -HostNameAlias %s", zone, domain, zone)
 	fullCmd := fmt.Sprintf("powershell -Command \"%s\"", cmd)
 
+	a.logger.Info("Running SSH command", zap.String("command", fullCmd))
+
 	output, err := session.CombinedOutput(fullCmd)
 	if err != nil {
+		a.logger.Error("Failed to run command", zap.Error(err), zap.String("output", string(output)))
 		return fmt.Errorf("failed to run command: %v, output: %s", err, string(output))
 	}
 
 	if strings.Contains(string(output), "Error") {
+		a.logger.Error("DNS record update failed", zap.String("output", string(output)))
 		return fmt.Errorf("DNS record update failed: %s", string(output))
 	}
 
+	a.logger.Info("DNS record updated successfully", zap.String("zone", zone), zap.String("domain", domain))
 	return nil
 }
 
