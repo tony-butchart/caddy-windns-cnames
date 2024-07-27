@@ -79,7 +79,7 @@ func (a *App) Provision(ctx caddy.Context) error {
 }
 
 func (a *App) Start() error {
-	if a.AutoCNAME {
+	if a.AutoCNAMEZone != "" {
 		err := a.addReverseProxyCNAMEs()
 		if err != nil {
 			return fmt.Errorf("failed to add reverse proxy CNAMEs: %v", err)

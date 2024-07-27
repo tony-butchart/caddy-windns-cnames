@@ -95,7 +95,7 @@ func parseApp(d *caddyfile.Dispenser, _ interface{}) (interface{}, error) {
 				return nil, err
 			}
 			app.TTL = caddy.Duration(dur)
-		case "auto_cname":
+		case "auto_cname_zone":
 			if !d.NextArg() {
 				return nil, d.ArgErr()
 			}
