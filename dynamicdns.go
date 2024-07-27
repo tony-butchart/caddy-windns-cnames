@@ -47,11 +47,11 @@ type App struct {
 	// The TTL to set on DNS records.
 	TTL caddy.Duration `json:"ttl,omitempty"`
 
-	// Configuration for automatic CNAME records
-	AutoCNAME struct {
-		Enabled bool   `json:"enabled,omitempty"`
-		Zone    string `json:"zone,omitempty"`
-	} `json:"auto_cname,omitempty"`
+	// If true, automatically create CNAME records for r"everse proxies
+	AutoCNAME bool `json:"auto_cname,omitempty"`
+
+	// The zone to use for automatic CNAME records
+	AutoCNAMEZone string `json:"auto_cname_zone,omitempty"`
 
 	ctx    caddy.Context
 	logger *zap.Logger
@@ -79,7 +79,7 @@ func (a *App) Provision(ctx caddy.Context) error {
 }
 
 func (a *App) Start() error {
-	if a.AutoCNAME.Enabled {
+	if a.AutoCNAME {
 		err := a.addReverseProxyCNAMEs()
 		if err != nil {
 			return fmt.Errorf("failed to add reverse proxy CNAMEs: %v", err)
@@ -204,7 +204,7 @@ func (a *App) addReverseProxyCNAMEs() error {
 									if a.Domains == nil {
 										a.Domains = make(map[string][]string)
 									}
-									a.Domains[a.AutoCNAME.Zone] = append(a.Domains[a.AutoCNAME.Zone], strings.TrimSuffix(host, "."+a.AutoCNAME.Zone))
+									a.Domains[a.AutoCNAMEZone] = append(a.Domains[a.AutoCNAMEZone], strings.TrimSuffix(host, "."+a.AutoCNAMEZone))
 								}
 							}
 						}

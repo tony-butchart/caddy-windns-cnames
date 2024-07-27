@@ -96,8 +96,7 @@ func parseApp(d *caddyfile.Dispenser, _ interface{}) (interface{}, error) {
 			}
 			app.TTL = caddy.Duration(dur)
 		case "auto_cname":
-			app.AutoCNAME = true
-			if d.NextArg() {
+			if !d.NextArg() {
 				app.AutoCNAMEZone = d.Val()
 			}
 		default:
