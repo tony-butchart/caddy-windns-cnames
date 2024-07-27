@@ -114,27 +114,32 @@ func (a *App) updateDNS() {
 	a.logger.Debug("beginning DNS update")
 
 	allDomains := a.allDomains()
+	a.logger.Debug("All domains to update", zap.Any("domains", allDomains))
 
 	for zone, domains := range allDomains {
+		a.logger.Debug("Processing zone", zap.String("zone", zone))
 		for _, domain := range domains {
+			a.logger.Debug("Updating CNAME record", zap.String("zone", zone), zap.String("domain", domain))
 			err := a.updateCNAME(zone, domain)
 			if err != nil {
-				a.logger.Error("failed updating CNAME record",
+				a.logger.Error("Failed updating CNAME record",
 					zap.String("zone", zone),
 					zap.String("domain", domain),
 					zap.Error(err))
 			} else {
-				a.logger.Info("updated CNAME record",
+				a.logger.Info("Updated CNAME record",
 					zap.String("zone", zone),
 					zap.String("domain", domain))
 			}
 		}
 	}
 
-	a.logger.Info("finished updating DNS")
+	a.logger.Info("Finished updating DNS")
 }
 
 func (a *App) updateCNAME(zone, domain string) error {
+	a.logger.Debug("Starting updateCNAME", zap.String("zone", zone), zap.String("domain", domain))
+
 	config := &ssh.ClientConfig{
 		User: a.DNSServer.User,
 		Auth: []ssh.AuthMethod{
@@ -160,11 +165,11 @@ func (a *App) updateCNAME(zone, domain string) error {
 	cmd := fmt.Sprintf("Add-DnsServerResourceRecordCName -ZoneName %s -Name %s -HostNameAlias %s", zone, domain, zone)
 	fullCmd := fmt.Sprintf("powershell -Command \"%s\"", cmd)
 
-	a.logger.Info("Running SSH command", zap.String("command", fullCmd))
+	a.logger.Debug("Executing SSH command", zap.String("command", fullCmd))
 
 	output, err := session.CombinedOutput(fullCmd)
 	if err != nil {
-		a.logger.Error("Failed to run command", zap.Error(err), zap.String("output", string(output)))
+		a.logger.Error("Failed to run SSH command", zap.Error(err), zap.String("output", string(output)))
 		return fmt.Errorf("failed to run command: %v, output: %s", err, string(output))
 	}
 
@@ -173,7 +178,7 @@ func (a *App) updateCNAME(zone, domain string) error {
 		return fmt.Errorf("DNS record update failed: %s", string(output))
 	}
 
-	a.logger.Info("DNS record updated successfully", zap.String("zone", zone), zap.String("domain", domain))
+	a.logger.Info("Successfully updated DNS record", zap.String("zone", zone), zap.String("domain", domain))
 	return nil
 }
 
